@@ -1,6 +1,8 @@
 """Job Spark silver : bronze (CSV brut) -> silver (Parquet nettoyé, typé, dédupliqué).
 
-Usage : spark-submit silver_trips.py --day 2022-07-01
+Usage :
+  spark-submit silver_trips.py --day 2022-07-15                       (un jour)
+  spark-submit silver_trips.py --start 2022-07-01 --end 2022-07-31    (une période, une seule session Spark)
 
 - Lit uniquement la partition bronze du jour : s3a://bronze/taxi_trips/day=YYYY-MM-DD/
 - Écrit les lignes valides dans    s3a://silver/taxi_trips/trip_date=YYYY-MM-DD/
@@ -8,12 +10,10 @@ Usage : spark-submit silver_trips.py --day 2022-07-01
   avec la raison du rejet (rien n'est jeté silencieusement).
 Rejouer un jour réécrit uniquement ses partitions : le job est idempotent.
 """
-import argparse
-
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
-from common import get_spark
+from common import get_spark, parse_days
 
 BRONZE_PATH = "s3a://bronze/taxi_trips"
 SILVER_PATH = "s3a://silver/taxi_trips"
@@ -133,25 +133,41 @@ def write_partition(df: DataFrame, root: str, day: str) -> None:
     df.drop("trip_date").coalesce(1).write.mode("overwrite").parquet(f"{root}/trip_date={day}")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--day", required=True, help="Jour à traiter, format YYYY-MM-DD")
-    day = parser.parse_args().day
+def process_day(spark: SparkSession, day: str) -> bool:
+    """Traite un jour. Renvoie False si sa partition bronze est absente."""
+    try:
+        raw = read_bronze(spark, day).cache()
+        n_raw = raw.count()
+    except Exception as exc:  # partition bronze absente
+        if "Path does not exist" not in str(exc):
+            raise
+        print(f"[silver] {day} : partition bronze absente, jour ignoré")
+        return False
 
-    spark = get_spark(f"silver_trips_{day}")
-    raw = read_bronze(spark, day).cache()
     valid, rejected = transform(raw, day)
     valid, rejected = valid.cache(), rejected.cache()
-
     write_partition(valid, SILVER_PATH, day)
     write_partition(rejected, QUARANTINE_PATH, day)
 
-    n_raw, n_valid, n_rejected = raw.count(), valid.count(), rejected.count()
+    n_valid, n_rejected = valid.count(), rejected.count()
     print(f"[silver] {day} : {n_raw} lignes bronze -> {n_valid} valides, "
           f"{n_rejected} en quarantaine, {n_raw - n_valid - n_rejected} doublons supprimés")
     if n_raw > 0 and n_valid == 0:
         raise ValueError(f"Aucune ligne valide pour {day} : vérifier le bronze ou les règles qualité")
+
+    for df in (raw, valid, rejected):  # libère la mémoire avant le jour suivant
+        df.unpersist()
+    return True
+
+
+def main() -> None:
+    days = parse_days()
+    # Une seule session Spark pour toute la période : on ne paie le démarrage qu'une fois
+    spark = get_spark(f"silver_trips_{days[0]}_{days[-1]}")
+    missing = [day for day in days if not process_day(spark, day)]
     spark.stop()
+    if missing:
+        raise ValueError(f"Bronze absent pour {len(missing)} jour(s) : {', '.join(missing)}")
 
 
 if __name__ == "__main__":

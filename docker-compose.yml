@@ -4,6 +4,8 @@ x-airflow-env: &airflow-env
   AIRFLOW__CORE__LOAD_EXAMPLES: "false"
   AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
   AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+  # Fuseau horaire unique (planning, dates saisies dans l'interface et en CLI) : un jour = un jour calendaire à Paris
+  AIRFLOW__CORE__DEFAULT_TIMEZONE: Europe/Paris
   # Connexion Spark : mode local pour l'instant, passer à spark://spark-master:7077 plus tard
   AIRFLOW_CONN_SPARK_LOCAL: '{"conn_type": "spark", "host": "local[*]"}'
   # Accès au stockage objet (S3-compatible) pour les jobs Spark et les tâches Python
@@ -14,13 +16,12 @@ x-airflow-env: &airflow-env
   SODA_DATASET_ID: ${SODA_DATASET_ID:-wrvz-psew}
   SODA_APP_TOKEN: ${SODA_APP_TOKEN:-}
   SODA_MAX_ROWS_PER_DAY: ${SODA_MAX_ROWS_PER_DAY:-0}
-  # Période traitée (jours inclus). Par défaut, aucun run automatique : chargement via backfill (PIPELINE_CATCHUP=true pour un lancement auto)
+  # Période traitée (jours inclus), utilisée par les 2 DAGs. Par défaut, pas de run auto (PIPELINE_CATCHUP=true pour l'activer)
   PIPELINE_START_DATE: ${PIPELINE_START_DATE:-2022-07-01}
   PIPELINE_END_DATE: ${PIPELINE_END_DATE:-2022-09-30}
   PIPELINE_CATCHUP: ${PIPELINE_CATCHUP:-false}
-  # Ressources Spark : défauts prudents (8 Go de RAM). Avec 16 Go+, passer SPARK_MAX_PARALLEL_JOBS à 2 ou 3
+  # Mémoire du job Spark (un seul job à la fois : tient sur un PC de 8 Go)
   SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-1g}
-  SPARK_MAX_PARALLEL_JOBS: ${SPARK_MAX_PARALLEL_JOBS:-1}
 
 x-minio-image: &minio-image pgsty/silo:RELEASE.2026-10-15T00-00-00Z
 

@@ -1,6 +1,8 @@
 """Job Spark gold : silver (trajets propres) -> tables analytiques prêtes pour la BI.
 
-Usage : spark-submit gold_aggregates.py --day 2022-07-01
+Usage :
+  spark-submit gold_aggregates.py --day 2022-07-15                       (un jour)
+  spark-submit gold_aggregates.py --start 2022-07-01 --end 2022-07-31    (une période, une seule session Spark)
 
 Lit la partition silver du jour, la joint au référentiel des 77 zones de Chicago,
 puis écrit 3 tables, chacune partitionnée par jour (s3a://gold/<table>/trip_date=YYYY-MM-DD/) :
@@ -11,12 +13,10 @@ puis écrit 3 tables, chacune partitionnée par jour (s3a://gold/<table>/trip_da
 
 Rejouer un jour réécrit uniquement ses partitions : le job est idempotent.
 """
-import argparse
-
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
-from common import get_spark
+from common import get_spark, parse_days
 
 SILVER_PATH = "s3a://silver/taxi_trips"
 GOLD_PATH = "s3a://gold"
@@ -84,18 +84,20 @@ def write_partition(df: DataFrame, table: str, day: str) -> None:
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--day", required=True, help="Jour à traiter, format YYYY-MM-DD")
-    day = parser.parse_args().day
-
-    spark = get_spark(f"gold_aggregates_{day}")
-    trips = (
-        spark.read.parquet(f"{SILVER_PATH}/trip_date={day}")
-        .withColumn("trip_date", F.lit(day).cast("date"))
-        .cache()
-    )
-    zones = read_zones(spark)
+def process_day(spark: SparkSession, zones: DataFrame, day: str) -> bool:
+    """Calcule les 3 tables gold d'un jour. Renvoie False si sa partition silver est absente."""
+    try:
+        trips = (
+            spark.read.parquet(f"{SILVER_PATH}/trip_date={day}")
+            .withColumn("trip_date", F.lit(day).cast("date"))
+            .cache()
+        )
+        trips.count()
+    except Exception as exc:  # partition silver absente
+        if "Path does not exist" not in str(exc):
+            raise
+        print(f"[gold] {day} : partition silver absente, jour ignoré")
+        return False
 
     tables = {
         "daily_revenue": daily_revenue(trips),
@@ -104,9 +106,20 @@ def main() -> None:
     }
     for name, df in tables.items():
         write_partition(df, name, day)
-        print(f"[gold] {day} : {name} écrite")
+    print(f"[gold] {day} : {', '.join(tables)} écrites")
+    trips.unpersist()
+    return True
 
+
+def main() -> None:
+    days = parse_days()
+    # Une seule session Spark pour toute la période : on ne paie le démarrage qu'une fois
+    spark = get_spark(f"gold_aggregates_{days[0]}_{days[-1]}")
+    zones = read_zones(spark).cache()
+    missing = [day for day in days if not process_day(spark, zones, day)]
     spark.stop()
+    if missing:
+        raise ValueError(f"Silver absent pour {len(missing)} jour(s) : {', '.join(missing)}")
 
 
 if __name__ == "__main__":

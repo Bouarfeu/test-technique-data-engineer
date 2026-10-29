@@ -1,98 +1,295 @@
-# Test technique Data Engineer
+# Chicago Taxi Trips – pipeline datalake de bout en bout
 
+Pipeline de données **orchestré, reproductible et exécutable en local** qui :
 
----
+1. **ingère** les trajets de taxi de Chicago (API SODA) dans un datalake objet (couche **bronze**) ;
+2. les **nettoie et les type** avec Spark (couche **silver**), en isolant les lignes invalides en quarantaine ;
+3. calcule des **tables analytiques** prêtes pour la BI (couche **gold**) : revenus par jour, durée des trajets, top des zones de prise en charge ;
+4. les **expose** dans un dashboard et via du SQL.
 
-## 1. Contexte & objectif
-
-Notre équipe data chez Artefact construit et opère des plateformes de type *datalake* pour ses clients. Ce test a pour but d'évaluer ta capacité à **concevoir et implémenter un pipeline de données de bout en bout**, orchestré, reproductible et fonctionnel en local.
-
-On ne cherche pas la solution la plus exhaustive possible, mais un projet **propre, structuré et qui tourne**. La qualité de l'architecture et de l'organisation du code compte autant que le résultat final.
-
----
-
-## 2. Le sujet
-
-Tu rejoins l'équipe data d'une entreprise de mobilité urbaine. On te confie la mise en place d'un pipeline qui doit :
-
-1. **ingérer** des données brutes de trajets (fichiers sources) dans le datalake ;
-2. **nettoyer et transformer** ces données pour en faire des tables analytiques ;
-3. **exposer** des agrégats prêts à l'emploi pour l'équipe BI (ex. revenus par jour, durée moyenne des trajets, top zones de prise en charge).
-
-Le tout doit être orchestré par un orchestrateur de ton choix (Dagster, Airflow?) et le *processing* réalisé avec **Spark (PySpark)**.
+**Stack** : Airflow 3 · PySpark 3.5 · MinIO-compatible (Silo) · Docker Compose · DuckDB · Streamlit
 
 ---
 
-## 3. Le jeu de données
+## Sommaire
 
-On te propose le dataset public **Chicago Taxi Trips**, fourni au format CSV.
-
-- Portail officiel : https://data.cityofchicago.org/Transportation/Taxi-Trips-2013-2023-/wrvz-psew
-- Le fichier complet est gros (plusieurs dizaines de Go), ne le télécharge pas en entier : récupère une tranche exploitable en local (ex. un trimestre, quelques millions de lignes) via l'API SODA, en filtrant sur `trip_start_timestamp` et en paginant. Vise un volume raisonnable.
-- Documente dans le README la période choisie et la commande/le script de téléchargement, pour que le pipeline reste **reproductible**.
+1. [Démarrage rapide](#1-démarrage-rapide)
+2. [Architecture](#2-architecture)
+3. [Données et reproductibilité](#3-données-et-reproductibilité)
+4. [Détail des couches](#4-détail-des-couches)
+5. [Choix techniques et arbitrages](#5-choix-techniques-et-arbitrages)
+6. [Organisation du code](#6-organisation-du-code)
+7. [Ce que j'aurais fait avec plus de temps](#7-ce-que-jaurais-fait-avec-plus-de-temps)
 
 ---
 
-## 4. Architecture attendue
+## 1. Démarrage rapide
 
-On attend une organisation en couches de type **médaillon** (raw → clean → aggregated), avec le stockage objet comme socle du datalake :
+### Prérequis
 
-```
-                 ┌─────────────┐
-   Sources  ───► │   BRONZE    │  données brutes ingérées telles quelles
-   (CSV)         │    (raw)    │  (partitionnées, non modifiées)
-                 └──────┬──────┘
-                        │  Spark : parsing, typage, dédup, nettoyage
-                        ▼
-                 ┌─────────────┐
-                 │   SILVER    │  données nettoyées, normalisées,
-                 │  (cleaned)  │  qualité contrôlée
-                 └──────┬──────┘
-                        │  Spark : jointures, agrégations métier
-                        ▼
-                 ┌─────────────┐
-                 │    GOLD     │  tables analytiques / KPIs
-                 │ (curated)   │  prêtes pour la BI
-                 └──────┬──────┘
-                        │
-                        ▼
-                 Couche d'exposition (SQL / API / dashboard)
+- **Docker Desktop** (ou Docker Engine + Compose v2)
+- **6 Go de RAM minimum alloués à Docker** (8 Go recommandés). Un seul job Spark tourne à la fois : le projet tient sur un PC de 8 Go.
+- Un accès internet (API de la ville de Chicago, téléchargement des images au premier lancement)
+
+### Lancement pas à pas
+
+**1. Démarrer la plateforme**
+
+```bash
+docker compose up --build
 ```
 
-Chaque couche est matérialisée dans le stockage objet (voir stack ci-dessous). L'ensemble est **orchestré par un ou plusieurs DAGs**.
+Le premier build prend quelques minutes (Java, PySpark, jars S3). Laisser ce terminal ouvert : les logs s'y affichent en direct (`Ctrl+C` pour tout arrêter).
+Au démarrage, les buckets `bronze`, `silver` et `gold` sont créés automatiquement.
+
+| Service | URL | Identifiants |
+|---|---|---|
+| Airflow | http://localhost:8080 | aucun (mode local) |
+| Stockage objet (console) | http://localhost:9001 | `minioadmin` / `minioadmin` |
+| Dashboard BI | http://localhost:8501 | – |
+
+**2. Ingestion : chargement de la période dans le bronze**
+
+Dans Airflow (http://localhost:8080) :
+1. ouvrir le DAG **`taxi_ingestion`** ;
+2. cliquer sur **Trigger**, puis choisir l'onglet **Backfill** ;
+3. renseigner la période : du **2022-07-01** au **2022-09-30** ;
+4. lancer.
+
+→ 92 runs (un par jour), 3 en parallèle.
+
+**3. Transformation : silver puis gold**
+
+Une fois tous les runs de `taxi_ingestion` au vert, ouvrir le DAG **`taxi_transform`** :
+1. cliquer sur **Trigger** (run unique, *Single Run*) ;
+2. renseigner `start_date` = **2022-07-01** et `end_date` = **2022-09-30** ;
+3. lancer.
+
+→ **1 seul run** pour tout le trimestre : `silver_transform` puis `gold_aggregates`, chacun dans une seule session Spark qui enchaîne les 92 jours.
+
+> Vérifier dans les logs de `silver_transform` que les dates reçues sont bien `--start 2022-07-01 --end 2022-09-30` : selon le fuseau horaire du navigateur, le sélecteur de date peut décaler d'un jour. Dans ce cas, relancer en saisissant les dates à nouveau.
+>
+> Le DAG accepte aussi un **backfill**, qui découpe la période en mois (3 runs : juillet, août, septembre) : pratique pour rejouer un mois isolément.
+
+**4. Consulter les résultats**
+
+Ouvrir le dashboard : http://localhost:8501 (KPIs, revenus par jour, durée par heure, top zones, requête SQL libre).
+
+### Où voir les données
+
+**Dans la console du stockage objet** (http://localhost:9001, `minioadmin` / `minioadmin`), chaque couche est un bucket, avec un dossier par jour :
+
+| Couche | Emplacement | Contenu |
+|---|---|---|
+| Bronze | `bronze/taxi_trips/day=2022-07-01/` | CSV bruts de l'API (`page_0001.csv`…) et `_manifest.json` |
+| Silver | `silver/taxi_trips/trip_date=2022-07-01/` | trajets nettoyés, un fichier Parquet par jour |
+| Quarantaine | `silver/taxi_trips_quarantine/trip_date=2022-07-01/` | lignes rejetées, avec la colonne `rejection_reason` |
+| Gold | `gold/daily_revenue/`, `gold/trip_duration_stats/`, `gold/pickup_zones_daily/` | tables KPIs, un dossier `trip_date=…` par jour |
+
+Les fichiers peuvent être téléchargés depuis la console (bouton **Download**) puis ouverts, par exemple, avec l'extension VS Code *Parquet Viewer* ou *Data Wrangler*.
+
+**Dans le dashboard** (http://localhost:8501), la zone **Requête SQL libre sur le gold** permet d'interroger les tables gold en SQL, par exemple :
+
+```sql
+SELECT * FROM pickup_zones_daily WHERE pickup_rank <= 3 ORDER BY trip_date, pickup_rank;
+SELECT count(*) AS nb_jours, sum(nb_trips) AS trajets, sum(total_revenue) AS ca FROM daily_revenue;
+```
+
+**Dans Airflow** (http://localhost:8080), les logs de chaque tâche indiquent les volumes traités :
+- `ingest_bronze` : `Jour 2022-07-01 terminé : 19188 lignes, 1 pages` ;
+- `silver_transform` : `[silver] 2022-07-01 : … lignes bronze -> … valides, … en quarantaine, … doublons supprimés` ;
+- `gold_aggregates` : `[gold] 2022-07-01 : daily_revenue, trip_duration_stats, pickup_zones_daily écrites`.
+
+### Durées indicatives (PC portable, 8 Go alloués à Docker)
+
+| Étape | Durée observée |
+|---|---|
+| Ingestion du trimestre (92 jours) | ~25 min sans jeton API (plus rapide avec `SODA_APP_TOKEN`) |
+| Transformation du trimestre (silver + gold) | quelques minutes |
+
+|
+
+### Rejouer ou retraiter
+
+- **Rejouer un jour d'ingestion** : DAG `taxi_ingestion` → cliquer sur la tâche du jour → **Clear Task Instance**. La partition bronze du jour est réécrite, sans doublon.
+- **Retraiter quelques jours** : DAG `taxi_transform` → **Trigger** avec `start_date` / `end_date` sur la période voulue. Seuls ces jours sont réécrits en silver et en gold.
+
+### Arrêter
+
+- `docker compose down -v` : arrêt et **suppression de toutes les données** (datalake et historique Airflow).
 
 ---
 
-## 5. Étapes à implémenter
+## 2. Architecture
 
-Tu es libre d'implémenter comme bon te semble, en te basant sur ta propre expérience.
+```mermaid
+flowchart LR
+    API[API SODA<br/>Chicago Taxi Trips]
+
+    subgraph compose[docker compose]
+        subgraph airflow[Airflow]
+            D1[DAG taxi_ingestion<br/>1 run = 1 jour]
+            D2[DAG taxi_transform<br/>1 run = 1 période]
+        end
+
+        subgraph lake[Stockage objet S3 - Silo/MinIO]
+            B[(bronze<br/>CSV brut<br/>day=YYYY-MM-DD)]
+            S[(silver<br/>Parquet typé, dédupliqué<br/>+ quarantaine<br/>trip_date=YYYY-MM-DD)]
+            G[(gold<br/>3 tables KPIs<br/>trip_date=YYYY-MM-DD)]
+        end
+
+        SP[Spark<br/>local mode]
+        DASH[Dashboard<br/>Streamlit + DuckDB]
+        PG[(Postgres<br/>métadonnées Airflow)]
+    end
+
+    API -->|pagination HTTP| D1
+    D1 -->|CSV bruts| B
+    D2 -->|spark-submit| SP
+    B --> SP --> S --> SP --> G
+    G -->|lecture SQL directe| DASH
+    airflow -.-> PG
+```
+
+**Deux DAGs, deux découpages**, chacun adapté à ce qui le ralentit :
+
+| | `taxi_ingestion` | `taxi_transform` |
+|---|---|---|
+| Contrainte | API lente sur les grosses requêtes | Démarrage de Spark (~30 s) coûteux |
+| Découpage | **1 run = 1 jour** (requêtes courtes) | **1 run = la période choisie** au Trigger (ou 1 mois par run en backfill) |
+| Tâches | `check_source_has_data` → `ingest_bronze` | `silver_transform` → `gold_aggregates` |
+
+Dans les trois couches, le **stockage est partitionné par jour**.
 
 ---
 
-## 6. Stack technique
+## 3. Données et reproductibilité
 
-**Imposée :**
-- **Airflow ou Dagster** pour l'orchestration ;
-- **Spark / PySpark** pour le processing ;
-- **Docker Compose** pour que tout tourne en local via une seule commande.
+- **Source** : [Taxi Trips (2013-2023)](https://data.cityofchicago.org/Transportation/Taxi-Trips-2013-2023-/wrvz-psew), dataset `wrvz-psew`, via l'API SODA.
+- **Période retenue** : **T3 2022, du 1er juillet au 30 septembre 2022** (92 jours, de l'ordre de 20 000 trajets par jour).
+- **Requête** : pour chaque jour, filtre `trip_start_timestamp >= 'J' AND trip_start_timestamp < 'J+1'`, tri stable `$order=:id`, pagination par `$limit` / `$offset` (pages de 20 000 lignes).
+- **Script** : [`dags/taxi/ingestion.py`](dags/taxi/ingestion.py), lancé par le DAG `taxi_ingestion` (backfill sur la période, cf. démarrage rapide).
 
+Chaque partition bronze contient un `_manifest.json` (requête exacte, nombre de lignes et de pages, date d'ingestion), qui assure la traçabilité de ce qui a été téléchargé.
 
-L'objectif : un `docker compose up` (éventuellement suivi d'un déclenchement de DAG) doit suffire à faire tourner le pipeline de bout en bout.
+---
+
+## 4. Détail des couches
+
+### Bronze : données brutes
+
+`s3://bronze/taxi_trips/day=YYYY-MM-DD/page_NNNN.csv` + `_manifest.json`
+
+- CSV **tels que renvoyés par l'API**, non modifiés, une page = un fichier.
+- `check_source_has_data` compte les trajets publiés pour le jour (côté API, sans téléchargement) : s'il n'y en a aucun, le run est marqué *skipped* et non en échec.
+- Rejouer un jour **supprime d'abord sa partition**, puis la réécrit : ingestion **idempotente**.
+- Robustesse HTTP : timeout de 300 s, 5 réessais par page avec attente exponentielle (y compris sur les erreurs 429 de throttling).
+
+### Silver : données nettoyées
+
+`s3://silver/taxi_trips/trip_date=YYYY-MM-DD/` et `s3://silver/taxi_trips_quarantine/trip_date=YYYY-MM-DD/`
+
+1. Lecture du CSV **par nom de colonne**, tout en texte, puis **typage explicite** (timestamps, décimaux pour les montants, entiers…).
+2. **Règles qualité** : chaque ligne invalide reçoit une `rejection_reason` et part en **quarantaine** (rien n'est supprimé silencieusement) :
+   `missing_trip_id`, `missing_start_timestamp`, `end_before_start`, `invalid_duration`, `duration_over_24h`, `negative_distance`, `invalid_fare`, `invalid_total`.
+3. **Déduplication** sur `trip_id`.
+4. Colonnes dérivées pour le gold : `trip_date`, `trip_hour`, `trip_minutes`.
+5. **Un fichier Parquet par jour**, écrit en écrasant le dossier du jour : job **idempotent**.
+
+### Gold : tables analytiques
+
+`s3://gold/<table>/trip_date=YYYY-MM-DD/`
+
+| Table | KPI | Contenu |
+|---|---|---|
+| `daily_revenue` | revenus par jour | nb de trajets, CA, pourboires, panier moyen, taux de pourboire, taxis actifs |
+| `trip_duration_stats` | durée des trajets | durée moyenne et médiane, distance moyenne, **par heure** |
+| `pickup_zones_daily` | top zones de prise en charge | prises en charge et CA par zone, **nom du quartier**, rang du jour |
+
+Le nom des quartiers provient d'une **jointure** avec le référentiel des 77 *community areas* de Chicago ([`jobs/seeds/community_areas.csv`](jobs/seeds/community_areas.csv)), en *broadcast join* (table minuscule).
+
+### Exposition
+
+- **Dashboard Streamlit** (http://localhost:8501) : 4 KPIs, revenus par jour, durée moyenne par heure, top 10 des zones, filtre de période.
+- **SQL** : DuckDB lit **directement** les Parquet du gold dans le stockage objet et expose une vue par table. Une zone de requête SQL libre est disponible dans le dashboard.
 
 ---
 
-## 7. Livrables
+## 5. Choix techniques et arbitrages
 
-1. Un **repo Git** contenant l'intégralité du code.
-2. Un **README** décrivant :
-   - le prérequis et la commande de lancement (pas à pas) ;
-   - un **schéma d'architecture** (même simple) ;
-   - tes choix techniques et tes arbitrages ;
-   - ce que tu aurais fait avec plus de temps.
-3. Le pipeline **fonctionnel en local**.
+**Orchestration : Airflow 3**
+- `standalone` + `LocalExecutor` dans un seul conteneur : simple et suffisant en local (pas de Celery ni de Redis).
+- **Postgres** sert uniquement de base de métadonnées à Airflow (état des DAGs, runs, tâches) ; les données métier sont dans le stockage objet. SQLite aurait empêché l'exécution parallèle des tâches.
+- Connexions et configuration passées par **variables d'environnement** : aucune action manuelle dans l'interface.
+- **Backfill plutôt que catchup automatique** par défaut : le chargement initial est un acte explicite. `PIPELINE_CATCHUP=true` permet tout de même un lancement entièrement automatique.
+
+**Découpage : ingestion par jour, transformation par période**
+- L'API SODA est lente et coupe les grosses requêtes : interroger un mois entier provoquait des timeouts. Par jour, chaque requête tient en une ou deux pages et répond en quelques secondes.
+- Spark met ~30 s à démarrer, pour quelques secondes de calcul par jour. Une première version lançait un job Spark par jour (~1 h pour le silver du trimestre) ; la version actuelle traite **toute une période dans une seule session Spark**, ce qui a rendu la transformation beaucoup plus rapide.
+- Le **stockage reste partitionné par jour** partout : rejouer un jour ne touche que son dossier.
+
+**Spark en mode local**
+- PySpark tourne dans le conteneur Airflow (`spark-submit --master local[*]`) : aucun cluster à maintenir, aucun problème de versions entre driver et workers.
+- Réglages adaptés aux petits volumes journaliers : `spark.sql.shuffle.partitions=4` (200 par défaut) et `coalesce(1)` à l'écriture (sinon des dizaines de micro-fichiers par jour).
+- Un seul job Spark à la fois, avec 1 Go de mémoire : le projet tient sur un poste de 8 Go.
+
+**Stockage objet : Silo (fork de MinIO), image épinglée**
+- Compatible S3 : le code est le même que sur un vrai cloud (`s3a://`).
+- MinIO a retiré ses images Docker publiques pendant le développement (`minio/minio` et `minio/mc` introuvables). Le projet utilise donc **Silo**, un fork maintenu, avec une **version épinglée** plutôt que `latest`, pour que le projet reste reproductible.
+
+**Formats**
+- Bronze en **CSV brut** (fidèle à la source), silver et gold en **Parquet** (colonnaire, typé, compressé).
+- Partitionnement au format Hive (`trip_date=…`) : Spark et DuckDB reconstruisent la colonne et ne lisent que les partitions utiles (*partition pruning*).
+- Parquet plutôt que Delta Lake : un jar de moins et pas de conflit de versions, l'idempotence étant assurée par la réécriture des partitions.
+
+**Qualité**
+- **Quarantaine** avec motif de rejet plutôt que suppression : traçabilité, suivi de la qualité de la source et possibilité de corriger une règle puis de rejouer.
+- Échec explicite si un jour n'a aucune ligne valide ou si une partition attendue est absente, plutôt qu'un succès vide.
+
+**Exposition : DuckDB + Streamlit**
+- DuckDB lit le gold sur place, sans base à alimenter ; Streamlit fournit un dashboard en quelques dizaines de lignes. Superset ou Metabase auraient été plus lourds à intégrer.
 
 ---
-## 8. Optionnel
-Toute autre proposition est la bienvenue.
+
+## 6. Organisation du code
+
+```
+.
+├── docker-compose.yml          # toute la plateforme (Postgres, stockage S3, Airflow, dashboard)
+├── docker/airflow.Dockerfile   # Airflow + Java 17 + PySpark + jars S3A
+├── requirements.txt
+├── dags/
+│   ├── taxi_ingestion.py       # DAG 1 : API -> bronze, un run par jour
+│   ├── taxi_transform.py       # DAG 2 : bronze -> silver -> gold, par période
+│   ├── hello_spark_minio.py    # smoke test de l'infrastructure (Spark -> stockage)
+│   └── taxi/ingestion.py       # logique d'ingestion (pagination, idempotence, manifest)
+├── jobs/                       # jobs Spark, indépendants d'Airflow
+│   ├── common.py               # SparkSession S3, parsing des dates à traiter
+│   ├── silver_trips.py         # typage, règles qualité, quarantaine, dédup
+│   ├── gold_aggregates.py      # 3 tables KPIs + jointure référentiel
+│   ├── show_table.py           # outil d'exploration d'une table Parquet
+│   └── seeds/community_areas.csv
+└── dashboard/                  # Streamlit + DuckDB
+```
+
+Les DAGs ne font qu'orchestrer ; la logique vit dans des modules Python et des jobs Spark exécutables seuls avec `spark-submit` (`--day 2022-07-15`, ou `--start` / `--end`).
+
 ---
-Good luck!
+
+## 7. Ce que j'aurais fait avec plus de temps
+
+**Qualité et tests**
+- Tests unitaires `pytest` des transformations silver et gold sur de petits DataFrames, et test d'intégrité des DAGs (`DagBag`), exécutés en **CI** (GitHub Actions, avec `ruff`).
+- Règles qualité supplémentaires sur les valeurs aberrantes (montants, distances, vitesses impossibles, `trip_total < fare`), et traçage des doublons en quarantaine.
+- Contrôles automatisés entre couches (Great Expectations / Soda) : complétude bronze vs source, volumétrie silver vs bronze, alerte si le taux de quarantaine dérive.
+
+**Production**
+- Exécution quotidienne : ingestion de la veille chaque matin (par exemple 8 h, Europe/Paris), puis déclenchement automatique de la transformation sur ce seul jour.
+- Cible GCP : **GCS** à la place du stockage local, **Dataproc Serverless** pour Spark (`DataprocCreateBatchOperator`), **Cloud Composer** pour Airflow, tables **BigLake / BigQuery** sur le gold pour la BI, infrastructure en **Terraform**.
+- Format de table **Delta Lake ou Iceberg** (MERGE, time travel, évolution de schéma) et un catalogue (Dataplex, Iceberg REST).
+- Référentiel des zones géré comme une table du datalake, avec son propre pipeline.
+- Secrets dans un gestionnaire dédié (Secret Manager) au lieu de variables en clair.
+
+**Performance**
+- Spark sur cluster ou serverless pour paralléliser les périodes ; la limite actuelle est la RAM d'un poste local.
+- Ingestion parallèle plus agressive avec un jeton API, et fusion du comptage de contrôle dans l'ingestion pendant les backfills.
