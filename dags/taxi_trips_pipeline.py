@@ -14,6 +14,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 
+from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
 from airflow.sdk import DAG, task
 
 from taxi.ingestion import count_day_rows, ingest_day
@@ -49,6 +50,17 @@ with DAG(
     def ingest_bronze(day: str) -> dict:
         return ingest_day(day)
 
-    check_source_has_data(day=DAY) >> ingest_bronze(day=DAY)
+    silver_transform = SparkSubmitOperator(
+        task_id="silver_transform",
+        conn_id="spark_local",
+        application="/opt/airflow/jobs/silver_trips.py",
+        py_files="/opt/airflow/jobs/common.py",
+        application_args=["--day", DAY],
+        conf={"spark.driver.memory": "2g"},
+        # Un seul job Spark à la fois (RAM) ; les ingestions des autres jours continuent en parallèle
+        max_active_tis_per_dag=1,
+    )
 
-    # Prochaines étapes : >> silver_transform >> quality_checks >> [gold_*]
+    check_source_has_data(day=DAY) >> ingest_bronze(day=DAY) >> silver_transform
+
+    # Prochaines étapes : >> quality_checks >> [gold_*]
