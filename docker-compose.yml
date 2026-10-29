@@ -10,6 +10,14 @@ x-airflow-env: &airflow-env
   S3_ENDPOINT: http://minio:9000
   S3_ACCESS_KEY: minioadmin
   S3_SECRET_KEY: minioadmin
+  # Ingestion SODA : dataset, token optionnel (anti-throttling), plafond de lignes par jour (0 = tout)
+  SODA_DATASET_ID: ${SODA_DATASET_ID:-wrvz-psew}
+  SODA_APP_TOKEN: ${SODA_APP_TOKEN:-}
+  SODA_MAX_ROWS_PER_DAY: ${SODA_MAX_ROWS_PER_DAY:-0}
+  # Période traitée (jours inclus). Par défaut, aucun run automatique : chargement via backfill (PIPELINE_CATCHUP=true pour un lancement auto)
+  PIPELINE_START_DATE: ${PIPELINE_START_DATE:-2022-07-01}
+  PIPELINE_END_DATE: ${PIPELINE_END_DATE:-2022-09-30}
+  PIPELINE_CATCHUP: ${PIPELINE_CATCHUP:-false}
 
 x-minio-image: &minio-image pgsty/silo:RELEASE.2026-10-15T00-00-00Z
 
