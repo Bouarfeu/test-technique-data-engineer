@@ -1,0 +1,4 @@
+pyspark==3.5.3
+apache-airflow-providers-apache-spark
+apache-airflow-providers-amazon
+requests
