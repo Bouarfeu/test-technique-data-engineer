@@ -22,8 +22,10 @@ START_DATE = os.environ.get("PIPELINE_START_DATE", "2022-07-01")
 END_DATE = os.environ.get("PIPELINE_END_DATE", "2022-09-30")
 CATCHUP = os.environ.get("PIPELINE_CATCHUP", "false").lower() == "true"
 
-# Airflow 3 : avec un cron, logical_date = date du run (ex. 2022-07-01 pour le 1er juillet)
-DAY = "{{ logical_date.strftime('%Y-%m-%d') }}"
+# Airflow 3 : avec un cron, logical_date = date du run (ex. 2022-07-01 00:00 pour le 1er juillet).
+# Conversion explicite en heure de Paris (fuseau par défaut du projet) : le jour traité est exactement
+# le jour saisi, sans décalage UTC.
+DAY = "{{ logical_date.in_timezone('Europe/Paris').strftime('%Y-%m-%d') }}"
 
 with DAG(
     dag_id="taxi_ingestion",

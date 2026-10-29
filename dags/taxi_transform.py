@@ -21,6 +21,7 @@ from airflow.sdk import DAG, Param
 
 START_DATE = os.environ.get("PIPELINE_START_DATE", "2022-07-01")
 SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "1g")
+TZ = "Europe/Paris"  # fuseau par défaut du projet (AIRFLOW__CORE__DEFAULT_TIMEZONE)
 
 
 def period_start(params: dict, logical_date) -> str:
@@ -29,7 +30,7 @@ def period_start(params: dict, logical_date) -> str:
         return params["start_date"]
     if logical_date is None:
         raise ValueError("Run manuel : renseigner start_date et end_date")
-    return logical_date.strftime("%Y-%m-01")
+    return logical_date.in_timezone(TZ).strftime("%Y-%m-01")
 
 
 def period_end(params: dict, logical_date) -> str:
@@ -38,8 +39,9 @@ def period_end(params: dict, logical_date) -> str:
         return params["end_date"]
     if logical_date is None:
         raise ValueError("Run manuel : renseigner start_date et end_date")
-    last_day = calendar.monthrange(logical_date.year, logical_date.month)[1]
-    return logical_date.strftime(f"%Y-%m-{last_day:02d}")
+    local = logical_date.in_timezone(TZ)
+    last_day = calendar.monthrange(local.year, local.month)[1]
+    return local.strftime(f"%Y-%m-{last_day:02d}")
 
 
 PERIOD_ARGS = [
