@@ -18,6 +18,9 @@ x-airflow-env: &airflow-env
   PIPELINE_START_DATE: ${PIPELINE_START_DATE:-2022-07-01}
   PIPELINE_END_DATE: ${PIPELINE_END_DATE:-2022-09-30}
   PIPELINE_CATCHUP: ${PIPELINE_CATCHUP:-false}
+  # Ressources Spark : défauts prudents (8 Go de RAM). Avec 16 Go+, passer SPARK_MAX_PARALLEL_JOBS à 2 ou 3
+  SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-1g}
+  SPARK_MAX_PARALLEL_JOBS: ${SPARK_MAX_PARALLEL_JOBS:-1}
 
 x-minio-image: &minio-image pgsty/silo:RELEASE.2026-10-15T00-00-00Z
 
@@ -77,6 +80,18 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  dashboard:
+    build: ./dashboard
+    environment:
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+    ports:
+      - "8501:8501"   # dashboard BI : http://localhost:8501
+    depends_on:
       minio-init:
         condition: service_completed_successfully
 
