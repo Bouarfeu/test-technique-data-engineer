@@ -56,11 +56,19 @@ with DAG(
         application="/opt/airflow/jobs/silver_trips.py",
         py_files="/opt/airflow/jobs/common.py",
         application_args=["--day", DAY],
-        conf={"spark.driver.memory": "2g"},
-        # Un seul job Spark à la fois (RAM) ; les ingestions des autres jours continuent en parallèle
-        max_active_tis_per_dag=1,
+        conf={"spark.driver.memory": "1g"},
+        # 2 jobs Spark max en parallèle (1 Go chacun) ; les ingestions continuent à côté
+        max_active_tis_per_dag=2,
     )
 
-    check_source_has_data(day=DAY) >> ingest_bronze(day=DAY) >> silver_transform
+    gold_aggregates = SparkSubmitOperator(
+        task_id="gold_aggregates",
+        conn_id="spark_local",
+        application="/opt/airflow/jobs/gold_aggregates.py",
+        py_files="/opt/airflow/jobs/common.py",
+        application_args=["--day", DAY],
+        conf={"spark.driver.memory": "1g"},
+        max_active_tis_per_dag=2,
+    )
 
-    # Prochaines étapes : >> quality_checks >> [gold_*]
+    check_source_has_data(day=DAY) >> ingest_bronze(day=DAY) >> silver_transform >> gold_aggregates

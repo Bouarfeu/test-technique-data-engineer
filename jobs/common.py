@@ -17,5 +17,7 @@ def get_spark(app_name: str) -> SparkSession:
         # Rejouer une partition n'écrase que cette partition -> idempotence
         .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
         .config("spark.sql.session.timeZone", "UTC")
+        # Un jour ≈ 20 000 lignes : 4 partitions de shuffle suffisent (200 par défaut = surcoût inutile)
+        .config("spark.sql.shuffle.partitions", "4")
         .getOrCreate()
     )
