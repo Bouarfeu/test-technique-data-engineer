@@ -16,10 +16,8 @@ x-airflow-env: &airflow-env
   SODA_DATASET_ID: ${SODA_DATASET_ID:-wrvz-psew}
   SODA_APP_TOKEN: ${SODA_APP_TOKEN:-}
   SODA_MAX_ROWS_PER_DAY: ${SODA_MAX_ROWS_PER_DAY:-0}
-  # Période traitée (jours inclus), utilisée par les 2 DAGs. Par défaut, pas de run auto (PIPELINE_CATCHUP=true pour l'activer)
-  PIPELINE_START_DATE: ${PIPELINE_START_DATE:-2022-07-01}
-  PIPELINE_END_DATE: ${PIPELINE_END_DATE:-2022-09-30}
-  PIPELINE_CATCHUP: ${PIPELINE_CATCHUP:-false}
+  # Premier jour accepté par les backfills = premier trajet du dataset wrvz-psew (2013-01-01)
+  PIPELINE_START_DATE: ${PIPELINE_START_DATE:-2013-01-01}
   # Mémoire du job Spark (un seul job à la fois : tient sur un PC de 8 Go)
   SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-1g}
 
