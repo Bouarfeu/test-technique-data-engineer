@@ -34,12 +34,6 @@ Pipeline de données **orchestré, reproductible et exécutable en local** qui :
 
 ### Lancement pas à pas
 
-**0. Cloner le dépôt**
-
-```bash
-git clone <url-du-depot>
-cd test-technique-data-engineer
-```
 
 Toutes les commandes suivantes se lancent depuis ce dossier, à la racine du projet (là où se trouve `docker-compose.yml`).
 
