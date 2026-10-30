@@ -27,11 +27,21 @@ Pipeline de données **orchestré, reproductible et exécutable en local** qui :
 
 ### Prérequis
 
+- **Git**
 - **Docker Desktop** (ou Docker Engine + Compose v2)
 - **6 Go de RAM minimum alloués à Docker** (8 Go recommandés). Un seul job Spark tourne à la fois : le projet tient sur un PC de 8 Go.
 - Un accès internet (API de la ville de Chicago, téléchargement des images au premier lancement)
 
 ### Lancement pas à pas
+
+**0. Cloner le dépôt**
+
+```bash
+git clone <url-du-depot>
+cd test-technique-data-engineer
+```
+
+Toutes les commandes suivantes se lancent depuis ce dossier, à la racine du projet (là où se trouve `docker-compose.yml`).
 
 **1. Démarrer la plateforme**
 
@@ -68,8 +78,7 @@ Une fois tous les runs de `taxi_ingestion` au vert, ouvrir le DAG **`taxi_transf
 → **1 seul run** pour tout le trimestre : `silver_transform` puis `gold_aggregates`, chacun dans une seule session Spark qui enchaîne les 92 jours.
 
 > Vérifier dans les logs de `silver_transform` que les dates reçues sont bien `--start 2022-07-01 --end 2022-09-30` : selon le fuseau horaire du navigateur, le sélecteur de date peut décaler d'un jour. Dans ce cas, relancer en saisissant les dates à nouveau.
->
-> Le DAG accepte aussi un **backfill**, qui découpe la période en mois (3 runs : juillet, août, septembre) : pratique pour rejouer un mois isolément.
+
 
 **4. Consulter les résultats**
 
@@ -107,7 +116,30 @@ SELECT count(*) AS nb_jours, sum(nb_trips) AS trajets, sum(total_revenue) AS ca 
 | Ingestion du trimestre (92 jours) | ~25 min sans jeton API (plus rapide avec `SODA_APP_TOKEN`) |
 | Transformation du trimestre (silver + gold) | quelques minutes |
 
-|
+### Configuration optionnelle (fichier `.env` à la racine)
+
+Toutes les variables ont une valeur par défaut : le `.env` n'est **pas** nécessaire.
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `SODA_APP_TOKEN` | vide | Jeton gratuit de l'API Chicago : évite le throttling et accélère l'ingestion |
+| `PIPELINE_START_DATE` | `2013-01-01` | Premier jour accepté par les backfills (premier trajet du dataset) |
+| `SODA_DATASET_ID` | `wrvz-psew` | Dataset source (`ajtu-isnz` pour les trajets 2024+) |
+| `SODA_MAX_ROWS_PER_DAY` | `0` (illimité) | Plafond de lignes par jour, pour un test rapide |
+| `SPARK_DRIVER_MEMORY` | `1g` | Mémoire du job Spark |
+
+### Fonctionnement quotidien (production)
+
+En plus du chargement historique, `taxi_ingestion` est **planifié chaque jour à 8 h (heure de Paris)** :
+
+```
+8h00  taxi_ingestion   ingère la VEILLE (journée complète) dans le bronze
+        └── déclenche automatiquement taxi_transform sur ce seul jour (silver puis gold)
+```
+
+- La transformation n'est déclenchée que pour les **runs planifiés** : en backfill, on évite ainsi un job Spark par jour, et la transformation se lance une seule fois sur toute la période (étape 3).
+- Le dataset de l'énoncé (`wrvz-psew`) s'arrête au 2023-12-31 : les runs quotidiens sont donc marqués *skipped* par `check_source_has_data`, sans erreur. Pour un flux réel, utiliser `SODA_DATASET_ID=ajtu-isnz` (trajets 2024+).
+- Au démarrage de la plateforme, Airflow peut créer le run de la veille : il est lui aussi *skipped* s'il n'y a pas de données.
 
 ### Rejouer ou retraiter
 
@@ -116,6 +148,7 @@ SELECT count(*) AS nb_jours, sum(nb_trips) AS trajets, sum(total_revenue) AS ca 
 
 ### Arrêter
 
+- `Ctrl+C` dans le terminal de `docker compose up`, puis `docker compose down` : arrêt, **données conservées**.
 - `docker compose down -v` : arrêt et **suppression de toutes les données** (datalake et historique Airflow).
 
 ---
@@ -156,8 +189,9 @@ flowchart LR
 | | `taxi_ingestion` | `taxi_transform` |
 |---|---|---|
 | Contrainte | API lente sur les grosses requêtes | Démarrage de Spark (~30 s) coûteux |
-| Découpage | **1 run = 1 jour** (requêtes courtes) | **1 run = la période choisie** au Trigger (ou 1 mois par run en backfill) |
-| Tâches | `check_source_has_data` → `ingest_bronze` | `silver_transform` → `gold_aggregates` |
+| Découpage | **1 run = 1 jour** (requêtes courtes) | **1 run = la période choisie** (`start_date` / `end_date`) |
+| Tâches | `check_source_has_data` → `ingest_bronze` → `is_daily_run` → `trigger_transform` | `silver_transform` → `gold_aggregates` |
+| Planification | **chaque jour à 8 h** (Europe/Paris), ingestion de la veille | aucune : déclenché par l'ingestion quotidienne, ou à la main |
 
 Dans les trois couches, le **stockage est partitionné par jour**.
 
@@ -165,7 +199,7 @@ Dans les trois couches, le **stockage est partitionné par jour**.
 
 ## 3. Données et reproductibilité
 
-- **Source** : [Taxi Trips (2013-2023)](https://data.cityofchicago.org/Transportation/Taxi-Trips-2013-2023-/wrvz-psew), dataset `wrvz-psew`, via l'API SODA.
+- **Source** : [Taxi Trips (2013-2023)](https://data.cityofchicago.org/Transportation/Taxi-Trips-2013-2023-/wrvz-psew), dataset `wrvz-psew`, via l'API SODA. Il couvre les trajets du **2013-01-01 00:00** au **2023-12-31 23:45** (`min` / `max` de `trip_start_timestamp`) : n'importe quelle période de cet intervalle peut être chargée en backfill.
 - **Période retenue** : **T3 2022, du 1er juillet au 30 septembre 2022** (92 jours, de l'ordre de 20 000 trajets par jour).
 - **Requête** : pour chaque jour, filtre `trip_start_timestamp >= 'J' AND trip_start_timestamp < 'J+1'`, tri stable `$order=:id`, pagination par `$limit` / `$offset` (pages de 20 000 lignes).
 - **Script** : [`dags/taxi/ingestion.py`](dags/taxi/ingestion.py), lancé par le DAG `taxi_ingestion` (backfill sur la période, cf. démarrage rapide).
@@ -221,7 +255,9 @@ Le nom des quartiers provient d'une **jointure** avec le référentiel des 77 *c
 - `standalone` + `LocalExecutor` dans un seul conteneur : simple et suffisant en local (pas de Celery ni de Redis).
 - **Postgres** sert uniquement de base de métadonnées à Airflow (état des DAGs, runs, tâches) ; les données métier sont dans le stockage objet. SQLite aurait empêché l'exécution parallèle des tâches.
 - Connexions et configuration passées par **variables d'environnement** : aucune action manuelle dans l'interface.
-- **Backfill plutôt que catchup automatique** par défaut : le chargement initial est un acte explicite. `PIPELINE_CATCHUP=true` permet tout de même un lancement entièrement automatique.
+- **Backfill plutôt que catchup automatique** : le chargement de l'historique est un acte explicite ; le planning quotidien ne traite que la veille.
+- **Planning à intervalles** (`CronDataIntervalTimetable`, 8 h Europe/Paris) : le run de J+1 à 8 h couvre la journée J, dont les données sont complètes. La même règle s'applique en backfill : un backfill du 2022-07-01 au 2022-09-30 ingère exactement ces jours.
+- **Enchaînement ingestion → transformation** par `TriggerDagRunOperator`, uniquement pour les runs planifiés : un nouveau jour est disponible en gold quelques minutes après 8 h.
 
 **Découpage : ingestion par jour, transformation par période**
 - L'API SODA est lente et coupe les grosses requêtes : interroger un mois entier provoquait des timeouts. Par jour, chaque requête tient en une ou deux pages et répond en quelques secondes.
@@ -259,8 +295,8 @@ Le nom des quartiers provient d'une **jointure** avec le référentiel des 77 *c
 ├── docker/airflow.Dockerfile   # Airflow + Java 17 + PySpark + jars S3A
 ├── requirements.txt
 ├── dags/
-│   ├── taxi_ingestion.py       # DAG 1 : API -> bronze, un run par jour
-│   ├── taxi_transform.py       # DAG 2 : bronze -> silver -> gold, par période
+│   ├── taxi_ingestion.py       # DAG 1 : API -> bronze, chaque jour à 8h (la veille)
+│   ├── taxi_transform.py       # DAG 2 : bronze -> silver -> gold, sur une période
 │   ├── hello_spark_minio.py    # smoke test de l'infrastructure (Spark -> stockage)
 │   └── taxi/ingestion.py       # logique d'ingestion (pagination, idempotence, manifest)
 ├── jobs/                       # jobs Spark, indépendants d'Airflow
@@ -284,7 +320,7 @@ Les DAGs ne font qu'orchestrer ; la logique vit dans des modules Python et des j
 - Contrôles automatisés entre couches (Great Expectations / Soda) : complétude bronze vs source, volumétrie silver vs bronze, alerte si le taux de quarantaine dérive.
 
 **Production**
-- Exécution quotidienne : ingestion de la veille chaque matin (par exemple 8 h, Europe/Paris), puis déclenchement automatique de la transformation sur ce seul jour.
+- Déclenchement de la transformation par *data-aware scheduling* (Assets Airflow) plutôt que par `TriggerDagRunOperator`, et alerting (Slack / e-mail) en cas d'échec ou de jour sans données.
 - Cible GCP : **GCS** à la place du stockage local, **Dataproc Serverless** pour Spark (`DataprocCreateBatchOperator`), **Cloud Composer** pour Airflow, tables **BigLake / BigQuery** sur le gold pour la BI, infrastructure en **Terraform**.
 - Format de table **Delta Lake ou Iceberg** (MERGE, time travel, évolution de schéma) et un catalogue (Dataplex, Iceberg REST).
 - Référentiel des zones géré comme une table du datalake, avec son propre pipeline.
