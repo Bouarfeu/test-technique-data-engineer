@@ -284,22 +284,25 @@ Le nom des quartiers provient d'une **jointure** avec le référentiel des 77 *c
 ## 6. Organisation du code
 
 ```
-.
 ├── docker-compose.yml          # toute la plateforme (Postgres, stockage S3, Airflow, dashboard)
 ├── docker/airflow.Dockerfile   # Airflow + Java 17 + PySpark + jars S3A
 ├── requirements.txt
 ├── dags/
 │   ├── taxi_ingestion.py       # DAG 1 : API -> bronze, chaque jour à 8h (la veille)
 │   ├── taxi_transform.py       # DAG 2 : bronze -> silver -> gold, sur une période
-│   ├── hello_spark_minio.py    # smoke test de l'infrastructure (Spark -> stockage)
-│   └── taxi/ingestion.py       # logique d'ingestion (pagination, idempotence, manifest)
+│   └── taxi/                   # code Python appelé par les DAGs
+│       ├── __init__.py         # (vide) fait de taxi un package Python importable
+│       └── ingestion.py        # logique d'ingestion (pagination, idempotence, manifest)
 ├── jobs/                       # jobs Spark, indépendants d'Airflow
 │   ├── common.py               # SparkSession S3, parsing des dates à traiter
 │   ├── silver_trips.py         # typage, règles qualité, quarantaine, dédup
 │   ├── gold_aggregates.py      # 3 tables KPIs + jointure référentiel
-│   ├── show_table.py           # outil d'exploration d'une table Parquet
-│   └── seeds/community_areas.csv
-└── dashboard/                  # Streamlit + DuckDB
+│   └── seeds/                  # référentiels versionnés avec le code
+│       └── community_areas.csv # 77 quartiers de Chicago (numéro -> nom)
+└── dashboard/                  # couche d'exposition (service docker compose, http://localhost:8501)
+    ├── Dockerfile              # image Python + Streamlit + DuckDB (extension S3 pré-installée)
+    ├── requirements.txt
+    └── app.py                  # vues SQL DuckDB sur le gold + KPIs, graphiques, requête SQL libre
 ```
 
 Les DAGs ne font qu'orchestrer ; la logique vit dans des modules Python et des jobs Spark exécutables seuls avec `spark-submit` (`--day 2022-07-15`, ou `--start` / `--end`).
