@@ -61,6 +61,7 @@ Dans Airflow (http://localhost:8080) :
 4. lancer.
 
 → 92 runs (un par jour), 3 en parallèle.
+> L'interface d'Airflow ne se met pas toujours à jour toute seule : ne pas hésiter à **rafraîchir la page**  pour voir les runs apparaître et changer d'état
 
 **3. Transformation : silver puis gold**
 
