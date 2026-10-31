@@ -27,7 +27,6 @@ Pipeline de données **orchestré, reproductible et exécutable en local** qui :
 
 ### Prérequis
 
-- **Git**
 - **Docker Desktop** (ou Docker Engine + Compose v2)
 - **6 Go de RAM minimum alloués à Docker** (8 Go recommandés). Un seul job Spark tourne à la fois : le projet tient sur un PC de 8 Go.
 - Un accès internet (API de la ville de Chicago, téléchargement des images au premier lancement)
@@ -35,7 +34,7 @@ Pipeline de données **orchestré, reproductible et exécutable en local** qui :
 ### Lancement pas à pas
 
 
-Toutes les commandes suivantes se lancent depuis ce dossier, à la racine du projet (là où se trouve `docker-compose.yml`).
+Les commandes se lancent à la racine du projet (là où se trouve `docker-compose.yml`)
 
 **1. Démarrer la plateforme**
 
