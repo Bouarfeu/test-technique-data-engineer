@@ -57,7 +57,7 @@ Au démarrage, les buckets `bronze`, `silver` et `gold` sont créés automatique
 Dans Airflow (http://localhost:8080) :
 1. ouvrir le DAG **`taxi_ingestion`** ;
 2. cliquer sur **Trigger**, puis choisir l'onglet **Backfill** ;
-3. renseigner la période : du **2022-07-01** au **2022-09-30** ;
+3. renseigner la période : du **2022-07-01** à minuit au **2022-09-30** à 23h59 ;
 4. lancer.
 
 → 92 runs (un par jour), 3 en parallèle.
